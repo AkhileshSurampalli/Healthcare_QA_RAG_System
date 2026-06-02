@@ -1,0 +1,71 @@
+import os
+from dotenv import load_dotenv
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+load_dotenv()
+
+def build_vector_store(chunks):
+    """
+    Convert each chhunk into a vector and store in FAISS
+    This calls the OpenAI API once per chunk
+    We save to disk so we never need to re-embed unless document changes.
+    """
+
+    print("Building embeddings - calling OpenAI API...")
+
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+    )
+
+    vector_store = FAISS.from_documents(chunks, embeddings)
+    print("Saved to faiss_index/")
+
+    return vector_store
+
+def load_vector_store():
+    """
+    Load existing FAISS index from disk
+    Use this on every run after the first - no API calls needed
+    """
+    embeddings = OpenAIEmbeddings(
+        model="test-embedding-3-small",
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+    )
+    vector_store = FAISS.load_local(
+        "faiss_index",
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
+    print(f"Loaded vector store with {vector_store.index.ntotal} vectors")
+    return vector_store
+
+def test_retrieval(vector_store, query: str):
+    """
+    Test retrieval (show top 3 most relevant chunks for a query)
+    Use this to verify that relevant content is being found.
+    """
+
+    print(f"\nQuery: '{query}'")
+    print("Top 3 retrieved chunks: \n")
+
+    results = vector_store.similarity_search(query, k=3)
+    for i, doc in enumerate(results):
+        print(f"Chunk {i+1}:")
+        print(f"{doc.page_content[:300]}")
+        print("-" * 50)
+
+if __name__ == "__main__":
+    import sys
+    sys.path.append(".")
+    from src.ingest import load_and_chunk
+
+    chunks = load_and_chunk("data/reference.pdf")
+    vector_store = build_vector_store(chunks)
+
+    # Test with healthcare questions relevant 
+    test_retrieval(vector_store, "What are the symptoms of malaria?")
+    test_retrieval(vector_store, "How should diabetes be managed?")
+    test_retrieval(vector_store, "What is the recommended treatment for pneumonia?")
+
