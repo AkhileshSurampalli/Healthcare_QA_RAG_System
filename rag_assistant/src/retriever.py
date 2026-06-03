@@ -5,6 +5,9 @@ from langchain_community.vectorstores import FAISS
 
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FAISS_PATH = os.path.join(BASE_DIR, "faiss_index")
+
 def build_vector_store(chunks):
     """
     Convert each chhunk into a vector and store in FAISS
@@ -20,6 +23,7 @@ def build_vector_store(chunks):
     )
 
     vector_store = FAISS.from_documents(chunks, embeddings)
+    vector_store.save_local("faiss_index")
     print("Saved to faiss_index/")
 
     return vector_store
@@ -30,7 +34,7 @@ def load_vector_store():
     Use this on every run after the first - no API calls needed
     """
     embeddings = OpenAIEmbeddings(
-        model="test-embedding-3-small",
+        model="text-embedding-3-small",
         openai_api_key = os.getenv("OPENAI_API_KEY")
     )
     vector_store = FAISS.load_local(
