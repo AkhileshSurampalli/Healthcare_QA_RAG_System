@@ -9,10 +9,6 @@ load_dotenv()
 
 def build_rag_chain(vector_store):
     """
-    Build a RAG chain using the modern LangChain LCEL syntax.
-    LCEL = LangChain Expression Language — the current standard way
-    to build chains in LangChain 0.2+
-    
     Flow:
     Question → retriever finds top 3 chunks →
     chunks + question sent to LLM → LLM generates answer

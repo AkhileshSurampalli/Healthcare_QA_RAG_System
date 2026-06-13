@@ -31,3 +31,4 @@ def load_and_chunk(pdf_path: str, chunk_size: int=500, chunk_overlap:int=500):
 
 if __name__ == "__main__":
     chunks = load_and_chunk("data/reference.pdf")
+
