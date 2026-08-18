@@ -13,6 +13,10 @@ The project loads a PDF document, splits it into chunks, embeds the chunks with 
 - RAG answer generation with LangChain LCEL
 - Source chunk display for retrieved context
 - Ragas-based evaluation for faithfulness, answer relevancy, context precision, and context recall
+- A ReAct healthcare reasoning agent (`langchain.agents.create_agent`) that decides
+  when to search the guideline, issues multiple targeted searches for multi-part
+  questions, and runs an exact weight-based dose calculation instead of a single
+  static retrieve-then-generate pass
 
 ## Project Structure
 
@@ -31,6 +35,8 @@ RAG_project/
         +-- ingest.py
         +-- retriever.py
         +-- chain.py
+        +-- tools.py
+        +-- agent.py
         +-- evaluate.py
 ```
 
@@ -38,8 +44,9 @@ RAG_project/
 
 1. `ingest.py` loads `data/reference.pdf` and splits the document into text chunks.
 2. `retriever.py` converts chunks into embeddings and saves them in a FAISS vector index.
-3. `chain.py` builds a RAG pipeline that retrieves the top matching chunks and sends them to the LLM with the user question.
-4. `evaluate.py` runs a small Ragas evaluation suite against sample medical questions.
+3. `chain.py` builds a **static** RAG pipeline: retrieve top-k chunks once, stuff them into a prompt, generate one answer. Good for simple, single-fact lookups.
+4. `tools.py` + `agent.py` build a **ReAct agent** on top of the same FAISS index: instead of one fixed retrieve → generate pass, the agent reasons about the question, decides whether and what to search for, can issue several searches for multi-part or comparative questions, and can call an exact dose-calculation tool rather than doing arithmetic itself. See [Reason About Healthcare Questions with the ReAct Agent](#4-reason-about-healthcare-questions-with-the-react-agent) below.
+5. `evaluate.py` runs a small Ragas evaluation suite against sample medical questions (against the static chain).
 
 ## Requirements
 
@@ -54,8 +61,10 @@ RAG_project/
 Install dependencies:
 
 ```bash
-pip install langchain langchain-community langchain-openai langchain-text-splitters faiss-cpu ragas datasets python-dotenv pypdf openai
+pip install langchain langchain-community langchain-openai langchain-text-splitters langgraph faiss-cpu ragas datasets python-dotenv pypdf openai
 ```
+
+`langgraph` is required by `langchain.agents.create_agent` (used by the ReAct agent in `agent.py`); `langchain>=1.0` is required for that API.
 
 ## Environment Setup
 
@@ -123,7 +132,48 @@ The prompt is designed to answer only from retrieved context. If the answer is n
 I don't have enough information in the document to answer this.
 ```
 
-### 4. Evaluate the RAG Pipeline
+### 4. Reason About Healthcare Questions with the ReAct Agent
+
+```bash
+python src/agent.py
+```
+
+or ask a custom question directly:
+
+```bash
+python src/agent.py "A child with pneumonia weighs 12 kg. What is the amoxicillin dose?"
+```
+
+This loads the same FAISS index and builds a **ReAct agent** (`langchain.agents.create_agent`) instead of a fixed retrieve-then-generate chain. On every question the agent:
+
+1. **Thinks** about what it needs to know.
+2. **Acts** by calling a tool — `search_clinical_guidelines` (semantic search over the guideline, callable multiple times with different queries) or `calculate_dose` (exact weight-based dosing arithmetic, so the LLM never has to "guess" numbers).
+3. **Observes** the tool result and decides whether it has enough grounded information yet, or needs to search again / calculate / ask a different sub-question.
+4. Only then produces a final answer, citing which retrieved passages it relied on.
+
+`ask()` in `agent.py` prints the full `Thought → Action → Observation → Answer` trace, not just the final text, so you can see the reasoning steps rather than a single opaque output.
+
+#### Why this is different from `chain.py`
+
+| | `chain.py` (static RAG) | `agent.py` (ReAct agent) |
+|---|---|---|
+| Retrieval | Always exactly one fixed top-k search | Agent decides if/when/how many times to search, and what to search for |
+| Multi-part questions | One search covers the whole question (context can be diluted or incomplete) | Can decompose into multiple targeted searches, one per sub-question |
+| Numeric reasoning (e.g. dosing) | LLM computes arithmetic itself in the generated text (error-prone) | Delegates arithmetic to a deterministic `calculate_dose` tool |
+| Visibility | Only the final answer + raw source chunks | Full step-by-step reasoning trace (Thought/Action/Observation) |
+
+Example questions that exercise multi-step reasoning (see `if __name__ == "__main__"` in `agent.py`):
+
+```text
+What are the symptoms of malaria and how is it treated?
+Compare how malaria and pneumonia are managed according to the guideline.
+A child with pneumonia weighs 12 kg. Using the amoxicillin dosing regimen in the guideline, what is their per-dose and daily dose in mg?
+What is the capital of France?
+```
+
+The last question is intentionally out of scope — like the static chain, the agent should refuse rather than answer from outside the document.
+
+### 5. Evaluate the RAG Pipeline
 
 ```bash
 python src/evaluate.py
@@ -145,6 +195,7 @@ cd rag_assistant
 python src/ingest.py
 python src/retriever.py
 python src/chain.py
+python src/agent.py
 python src/evaluate.py
 ```
 
@@ -162,6 +213,10 @@ Important settings are currently defined directly in the source files:
   - chat model: `gpt-4o-mini`
   - retrieval `k=3`
   - temperature: `0`
+- `src/tools.py` / `src/agent.py`
+  - retrieval `k=3` (via `build_tools(vector_store, k=3)`)
+  - chat model: `gpt-4o-mini`, temperature: `0`
+  - system prompt controlling ReAct behavior and refusal wording
 
 For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, and model choice.
 
@@ -173,6 +228,8 @@ For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, 
 - `FAISS.load_local(..., allow_dangerous_deserialization=True)` should only be used with indexes you trust.
 - A chunk overlap equal to the chunk size may create highly redundant chunks; consider using a smaller overlap such as `50` to `100`.
 - Checked-in virtual environments and `.env` files can make the repository large and may expose secrets if real keys are committed.
+- `src/agent.py` requires `langchain>=1.0` (for `langchain.agents.create_agent`) and `langgraph` installed; an older `langchain` will raise `ImportError`.
+- The agent makes at least one extra LLM call per tool invocation compared to the static chain, so it is slower and uses more tokens per question in exchange for more thorough, inspectable reasoning.
 
 ## How To Validate
 
@@ -182,16 +239,16 @@ After setup, validate the project in stages:
 2. Run `python src/retriever.py` and confirm FAISS stores vectors successfully.
 3. Run `python src/chain.py` and check that in-document questions receive grounded answers.
 4. Ask an unrelated question and verify the assistant refuses to answer from outside knowledge.
-5. Run `python src/evaluate.py` and inspect the Ragas metric averages.
+5. Run `python src/agent.py` and confirm the printed trace shows `[Action]` / `[Observation]` steps before the `[Answer]`, that the dosing question triggers both `search_clinical_guidelines` and `calculate_dose`, and that the out-of-scope question is refused.
+6. Run `python src/evaluate.py` and inspect the Ragas metric averages.
 
 ## Future Improvements
 
 - Add a `requirements.txt` file with pinned dependency versions.
 - Move model names, chunking values, and index paths into a config file.
-- Add a command-line interface for custom questions.
 - Support multiple PDFs or a folder of documents.
-- Store source metadata such as page number in final answers.
 - Add automated tests for ingestion, retrieval, and refusal behavior.
+- Add Ragas-style evaluation for the ReAct agent (not just the static chain), e.g. scoring tool-call correctness and final-answer groundedness.
 - Remove local `venv/`, `__pycache__/`, and secret files from version control.
 
 ## License
