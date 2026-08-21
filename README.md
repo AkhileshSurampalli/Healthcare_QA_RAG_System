@@ -1,4 +1,4 @@
-# RAG Project
+# Healthcare Q&A RAG System
 
 A Retrieval-Augmented Generation (RAG) assistant built with LangChain, OpenAI, FAISS, and Ragas.
 
