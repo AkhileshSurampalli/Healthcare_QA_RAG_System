@@ -42,7 +42,7 @@ def build_agent(vector_store, model: str = "gpt-4o-mini"):
     tools = build_tools(vector_store)
     llm = ChatOpenAI(
         model=model,
-        temperature=0,
+        temperature=0.7,
         openai_api_key=os.getenv("OPENAI_API_KEY")
     )
     return create_agent(llm, tools=tools, system_prompt=SYSTEM_PROMPT)

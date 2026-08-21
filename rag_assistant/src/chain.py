@@ -38,7 +38,7 @@ Answer:"""
 
     llm = ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0,
+        temperature=0.7,
         openai_api_key=os.getenv("OPENAI_API_KEY")
     )
 
@@ -46,7 +46,7 @@ Answer:"""
         """Join retrieved chunks into a single context string."""
         return "\n\n".join(doc.page_content for doc in docs)
 
-    # LCEL chain — modern syntax replacing RetrievalQA
+    # LCEL chain 
     chain = (
         {
             "context": retriever | format_docs,

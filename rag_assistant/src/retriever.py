@@ -10,7 +10,7 @@ FAISS_PATH = os.path.join(BASE_DIR, "faiss_index")
 
 def build_vector_store(chunks):
     """
-    Convert each chhunk into a vector and store in FAISS
+    Convert each chunk into a vector and store in FAISS
     This calls the OpenAI API once per chunk
     We save to disk so we never need to re-embed unless document changes.
     """
