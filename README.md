@@ -226,7 +226,6 @@ For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, 
 - If `reference.pdf` changes, the FAISS index should be rebuilt.
 - The code assumes commands are run from the `rag_assistant/` directory.
 - `FAISS.load_local(..., allow_dangerous_deserialization=True)` should only be used with indexes you trust.
-- A chunk overlap equal to the chunk size may create highly redundant chunks; consider using a smaller overlap such as `50` to `100`.
 - Checked-in virtual environments and `.env` files can make the repository large and may expose secrets if real keys are committed.
 - `src/agent.py` requires `langchain>=1.0` (for `langchain.agents.create_agent`) and `langgraph` installed; an older `langchain` will raise `ImportError`.
 - The agent makes at least one extra LLM call per tool invocation compared to the static chain, so it is slower and uses more tokens per question in exchange for more thorough, inspectable reasoning.
