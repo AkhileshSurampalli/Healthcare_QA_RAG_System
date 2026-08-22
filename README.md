@@ -1,4 +1,4 @@
-# RAG Project
+# Healthcare Q&A RAG System
 
 A Retrieval-Augmented Generation (RAG) assistant built with LangChain, OpenAI, FAISS, and Ragas.
 
@@ -310,8 +310,13 @@ For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, 
 - If `reference.pdf` changes, the FAISS index should be rebuilt.
 - The code assumes commands are run from the `rag_assistant/` directory.
 - `FAISS.load_local(..., allow_dangerous_deserialization=True)` should only be used with indexes you trust.
+<<<<<<< HEAD
 - A chunk overlap equal to the chunk size may create highly redundant chunks; consider using a smaller overlap such as `50` to `100`.
 - `langchain-community` must stay pinned to `0.4.1` — see the note in [Requirements](#requirements). Running `pip install -U langchain-community` (or any tool that bumps it independently of `requirements.txt`) will silently break `evaluate.py`/`evaluate_agent.py`.
+=======
+- Checked-in virtual environments and `.env` files can make the repository large and may expose secrets if real keys are committed.
+- `src/agent.py` requires `langchain>=1.0` (for `langchain.agents.create_agent`) and `langgraph` installed; an older `langchain` will raise `ImportError`.
+>>>>>>> 512a783af51da055cc9a04d2b07e8e5aa51eb6af
 - The agent makes at least one extra LLM call per tool invocation compared to the static chain, so it is slower and uses more tokens per question in exchange for more thorough, inspectable reasoning.
 - `api.py` builds the chain and agent once at startup; if `faiss_index/` or `.env` isn't in place before the server starts, startup will fail rather than an individual request.
 - Older clones of this repo may still have `rag_assistant/venv/` and `rag_assistant/.env` tracked in git history (from before `.gitignore` was fixed) even though they're untracked going forward — history wasn't rewritten, only future commits are affected.
