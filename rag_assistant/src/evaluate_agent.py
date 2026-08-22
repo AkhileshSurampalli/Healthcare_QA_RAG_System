@@ -15,14 +15,22 @@ REFUSAL_TEXT = "I don't have enough information in the document to answer this."
 BEHAVIOR_CASES = [
     {
         "question": (
-            "A child with pneumonia weighs 12 kg. Using the amoxicillin dosing "
-            "regimen in the guideline, what is their per-dose and daily dose in mg?"
+            "A child with pneumonia weighs 12 kg. What is the amoxicillin per-dose "
+            "and daily dose in mg?"
         ),
-        "expect_tools": {"search_clinical_guidelines": 1, "calculate_dose": 1},
+        "expect_tools": {"lookup_dosing_table": 1, "calculate_dose": 1},
     },
     {
-        "question": "Compare how malaria and pneumonia are managed according to the guideline.",
+        "question": "Compare how malaria and pneumonia are managed according to the sources.",
         "expect_tools": {"search_clinical_guidelines": 2},
+    },
+    {
+        # artemether-lumefantrine is weight-band dosed, not a simple mg/kg number -
+        # the agent should look it up but NOT blindly feed it to calculate_dose.
+        "question": "What is the dosing for artemether-lumefantrine and can I calculate "
+                    "a per-kg dose for it?",
+        "expect_tools": {"lookup_dosing_table": 1},
+        "expect_tools_not_called": ["calculate_dose"],
     },
     {
         "question": "What is the capital of France?",
@@ -100,6 +108,10 @@ def run_behavior_checks(agent):
             actual = tool_calls.get(tool_name, 0)
             if actual < min_calls:
                 failures.append(f"expected >= {min_calls} call(s) to {tool_name}, got {actual}")
+        for tool_name in case.get("expect_tools_not_called", []):
+            actual = tool_calls.get(tool_name, 0)
+            if actual > 0:
+                failures.append(f"expected {tool_name} not to be called, got {actual} call(s)")
 
         status = "PASS" if not failures else "FAIL"
         all_passed = all_passed and not failures

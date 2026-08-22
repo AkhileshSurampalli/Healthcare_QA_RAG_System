@@ -63,12 +63,19 @@ def test_retrieval(vector_store, query: str):
 if __name__ == "__main__":
     import sys
     sys.path.append(".")
-    from src.ingest import load_and_chunk
+    from src.ingest import load_pdf_chunks, load_web_chunks
 
-    chunks = load_and_chunk("data/reference.pdf")
+    # Multi-source: PDF chunks + web chunks go into the same index. Each chunk's
+    # `source` metadata (file path vs. URL) is what lets tools.py cite where an
+    # answer actually came from.
+    pdf_chunks = load_pdf_chunks("data/reference.pdf")
+    web_chunks = load_web_chunks()
+    chunks = pdf_chunks + web_chunks
+    print(f"\nTotal chunks from all sources: {len(chunks)}")
+
     vector_store = build_vector_store(chunks)
 
-    # Test with healthcare questions relevant 
+    # Test with healthcare questions relevant
     test_retrieval(vector_store, "What are the symptoms of malaria?")
     test_retrieval(vector_store, "How should diabetes be managed?")
     test_retrieval(vector_store, "What is the recommended treatment for pneumonia?")

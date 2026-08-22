@@ -1,0 +1,33 @@
+# Core LangChain stack
+langchain==1.3.4
+langchain-core==1.4.0
+langchain-openai==1.2.2
+langchain-text-splitters==1.1.2
+langgraph==1.2.4
+
+# langchain-community is pinned to 0.4.1, NOT the latest 0.4.2: ragas 0.4.3
+# unconditionally imports langchain_community.chat_models.vertexai.ChatVertexAI,
+# which was removed in 0.4.2. Do not bump this without re-checking that import.
+langchain-community==0.4.1
+
+# Vector store, embeddings, document loading
+faiss-cpu==1.14.2
+pypdf==6.12.2
+beautifulsoup4==4.15.0
+
+# Structured-source lookup (dosing table)
+pandas==3.0.5
+
+# OpenAI client
+openai==2.41.0
+
+# Evaluation
+ragas==0.4.3
+datasets==4.8.5
+
+# API service
+fastapi==0.136.3
+uvicorn[standard]==0.49.0
+
+# Config
+python-dotenv==1.2.2

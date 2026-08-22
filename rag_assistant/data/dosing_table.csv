@@ -1,0 +1,6 @@
+drug,indication,population,dose_per_kg,dose_unit,frequency_per_day,max_single_dose,max_dose_unit,notes
+Amoxicillin,Non-severe pneumonia,Pediatric,25,mg,2,500,mg,"SAMPLE DATA - verify against an authoritative guideline before clinical use. Oral. Standard first-line for children previously treated with cotrimoxazole."
+Cotrimoxazole,Non-severe pneumonia,Pediatric,4,mg (trimethoprim component),2,160,mg,"SAMPLE DATA - verify against an authoritative guideline before clinical use. Oral. First-line for children not previously treated with cotrimoxazole."
+Benzylpenicillin,Severe pneumonia,Pediatric,50000,units,4,NA,NA,"SAMPLE DATA - verify against an authoritative guideline before clinical use. IM/IV. Used alone for severe pneumonia requiring hospital admission."
+Artemether-lumefantrine,Uncomplicated malaria,Pediatric,NA,weight-band dosing (not mg/kg),2,NA,NA,"SAMPLE DATA - verify against an authoritative guideline before clinical use. Dosed by weight-band tablet count over 3 days, not simple mg/kg. Do not use calculate_dose for this drug."
+Metformin,Type 2 diabetes,Adult,NA,fixed titrated dose (not weight-based),2,2000,mg total daily,"SAMPLE DATA - verify against an authoritative guideline before clinical use. Oral. Started low (e.g. 500 mg) and titrated; not weight-based."
