@@ -18,7 +18,9 @@ The project ingests **three kinds of sources** — a PDF clinical guideline, ref
   issues multiple targeted searches for multi-part questions, and runs an exact
   weight-based dose calculation instead of a single static retrieve-then-generate pass
 - A FastAPI service exposing both the static chain and the ReAct agent as HTTP endpoints
+- A minimal browser frontend (vanilla HTML/JS, no build step) served by that same FastAPI app
 - One pinned `requirements.txt` and a single project venv (`rag_assistant/.venv`)
+- A `Dockerfile` that bakes in the pre-built FAISS index, so the built image is the deployable unit — see [Deployment](#deployment)
 
 ## Project Structure
 
@@ -30,6 +32,8 @@ RAG_project/
 +-- rag_assistant/
     +-- .env                  (not committed)
     +-- .gitignore
+    +-- .dockerignore
+    +-- Dockerfile
     +-- requirements.txt
     +-- data/
     |   +-- reference.pdf
@@ -37,6 +41,8 @@ RAG_project/
     +-- faiss_index/
     |   +-- index.faiss
     |   +-- index.pkl
+    +-- frontend/
+    |   +-- index.html
     +-- src/
         +-- __init__.py
         +-- ingest.py
@@ -252,6 +258,7 @@ Starts a FastAPI service on `http://localhost:8000` that loads the vector store 
 
 | Endpoint | Behavior |
 |---|---|
+| `GET /` | The browser frontend (`frontend/index.html`) |
 | `GET /health` | Liveness check |
 | `POST /ask` | Static chain — `{"question": "..."}` → `{"answer": "...", "sources": [{"content": "...", "source": "data/reference.pdf", "page": 3}, ...]}` (`source` is a file path or URL; `page` is only present for PDF chunks) |
 | `POST /agent/ask` | ReAct agent — `{"question": "..."}` → `{"answer": "...", "trace": [{"type": "action", "tool": "...", "args": {...}}, {"type": "observation", "tool": "...", "content": "..."}, {"type": "answer", "content": "..."}]}` |
@@ -266,6 +273,89 @@ curl -X POST http://localhost:8000/agent/ask \
 
 The `trace` array in the agent response is the same Thought/Action/Observation data `agent.py`'s `ask()` prints to the console — `api.py` returns it as structured JSON instead of printing it, via the shared `run_with_trace()` function in `agent.py`.
 
+#### The frontend
+
+Open `http://localhost:8000/` in a browser: a text box, a "ReAct Agent" / "Static Chain" toggle, and a results panel. It's a single static HTML file (`frontend/index.html`) with no framework and no build step — vanilla JS `fetch()` calls to `/ask` and `/agent/ask` — mounted onto the same FastAPI app via `StaticFiles`:
+
+```python
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+```
+
+This mount is registered **after** the `/health`, `/ask`, and `/agent/ask` routes in `api.py`. Starlette matches routes in registration order, so those exact paths are still handled by their own functions; the mount only catches everything else (`/`, and would 404 anything not in `frontend/`). One consequence worth knowing: because the frontend is served from the same origin as the API, there's no CORS configuration anywhere — `fetch("/ask")` is a same-origin request. If you ever split the frontend out to its own domain (a separate static host, S3+CloudFront, etc.), you'd need to add `CORSMiddleware` to `api.py` and enable it for that origin.
+
+For the agent tab, the trace renders as color-coded Action / Observation / Answer blocks — the same three step types `run_with_trace()` returns.
+
+## Deployment
+
+The whole app — API, agent, and frontend — is one FastAPI process, which makes it one deployable unit: a container. `Dockerfile` bakes in the pre-built `faiss_index/`, so the image doesn't need `OPENAI_API_KEY` (or network access) at *build* time, only at *run* time for the actual chat/embedding calls.
+
+### 1. Build and run the image locally
+
+```bash
+cd rag_assistant
+docker build -t healthcare-rag-assistant .
+docker run -d --name rag-app -p 8000:8000 -e OPENAI_API_KEY=your_real_key healthcare-rag-assistant
+```
+
+Then open `http://localhost:8000/`. Check logs with `docker logs rag-app`; stop it with `docker rm -f rag-app`.
+
+Two things baked into the `Dockerfile` on purpose:
+- `data/`, `faiss_index/`, `frontend/`, and `src/` are copied in; `.env` is **not** (see `.dockerignore`) — the key is always passed in as a runtime environment variable, never as an image layer, so it can't leak if the image is ever pushed somewhere public.
+- The index is copied in as-is rather than rebuilt during `docker build`. If you change `ingest.py` or re-run `retriever.py` locally, you must rebuild the image afterward for the new index to ship — the container has no logic to detect or rebuild a stale index itself.
+
+### 2. Push the image to Amazon ECR
+
+Everything below assumes the AWS CLI is installed and `aws configure` has already been run with credentials that can create ECR/App Runner resources.
+
+```bash
+aws ecr create-repository --repository-name healthcare-rag-assistant --region <your-region>
+
+aws ecr get-login-password --region <your-region> \
+  | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<your-region>.amazonaws.com
+
+docker tag healthcare-rag-assistant:latest \
+  <account-id>.dkr.ecr.<your-region>.amazonaws.com/healthcare-rag-assistant:latest
+
+docker push <account-id>.dkr.ecr.<your-region>.amazonaws.com/healthcare-rag-assistant:latest
+```
+
+(`<account-id>` is your 12-digit AWS account ID, visible in the console top-right or via `aws sts get-caller-identity`.)
+
+### 3. Run it on AWS App Runner (recommended)
+
+App Runner is the least AWS infrastructure to manage for a single containerized web service: point it at an image, it handles the load balancer, HTTPS, and scaling. No VPC/ALB/ECS task definitions to write by hand.
+
+1. AWS Console → **App Runner** → **Create service**.
+2. Source: **Container registry** → **Amazon ECR** → pick the image you just pushed.
+3. Deployment trigger: **Manual** (simplest to start — automatic redeploys on every image push is a later refinement).
+4. Service settings:
+   - Port: `8000`
+   - CPU/memory: at least **1 vCPU / 2 GB** — `langchain` + `ragas` + `faiss` + `pandas` have real import overhead, and the FAISS index (~5,000 vectors) sits in memory alongside them.
+   - Environment variables: add `OPENAI_API_KEY` with your real key. (For anything beyond a personal demo, use **AWS Secrets Manager** and reference the secret instead of pasting the key in plaintext — App Runner supports this directly in the same environment variables section.)
+5. Health check: path `/health`, which is exactly why that endpoint exists as a separate, dependency-free route.
+6. Create the service. App Runner builds it, assigns a `https://<random-id>.<region>.awsapprunner.com` URL, and that's your public endpoint — the same frontend you tested locally now works over the internet, same code, same origin, no CORS setup needed.
+
+**Cost note:** App Runner keeps at least one instance running even at zero traffic — there's no scale-to-zero — so it has a non-trivial idle cost. Fine for a demo you want reachable on-demand; if idle cost matters more than simplicity, look at ECS Fargate with a scheduled scale-down, or accept EC2's manual tradeoffs below.
+
+### Alternative: plain EC2
+
+More manual, but cheaper to reason about and useful if you want SSH access to debug directly:
+
+1. Launch an EC2 instance (Ubuntu 22.04, **t3.small** or larger — the free-tier `t2.micro`'s 1 GB RAM is too tight for this dependency stack) with a security group allowing inbound `80` (and `22` for SSH).
+2. SSH in, install Docker (`sudo apt-get update && sudo apt-get install -y docker.io`), and either `git clone` this repo or `scp` the `rag_assistant/` directory over — `faiss_index/` must come with it.
+3. Create `rag_assistant/.env` on the instance directly (never commit it, never bake it into the image) with the real `OPENAI_API_KEY`.
+4. Build and run, mapping to port 80 so no reverse proxy is needed for plain HTTP:
+   ```bash
+   cd rag_assistant
+   sudo docker build -t healthcare-rag-assistant .
+   sudo docker run -d --name rag-app -p 80:8000 --env-file .env --restart unless-stopped healthcare-rag-assistant
+   ```
+5. Visit `http://<instance-public-ip>/`. For HTTPS on a real domain, put an Application Load Balancer with an ACM certificate in front, or run Caddy/nginx + Certbot on the instance itself — plain EC2 gives you no HTTPS for free the way App Runner does.
+
+### Updating a deployment
+
+Whether on App Runner or EC2, the update flow is the same: rebuild the image locally (picking up any code, data, or FAISS index changes), push it (`docker push` to ECR, or rebuild in place on the EC2 host), and redeploy (App Runner: trigger a deployment from the new ECR image; EC2: `docker rm -f rag-app` then re-run the `docker run` command). There's no hot-reload path for a running container — a new index or a code change always means a new image.
+
 ## Example Workflow
 
 ```bash
@@ -277,6 +367,9 @@ python src/agent.py
 python src/evaluate.py
 python src/evaluate_agent.py
 python src/api.py
+# or, containerized:
+docker build -t healthcare-rag-assistant .
+docker run -d -p 8000:8000 -e OPENAI_API_KEY=your_real_key healthcare-rag-assistant
 ```
 
 ## Configuration
@@ -301,6 +394,9 @@ Important settings are currently defined directly in the source files:
 - `src/api.py`
   - host `0.0.0.0`, port `8000` (when run via `python src/api.py`; override with `uvicorn src.api:app --host ... --port ...`)
   - chain and agent are built once at startup (in the `lifespan` handler), not per-request
+  - `FRONTEND_DIR` — defaults to `frontend/`, mounted at `/`
+- `Dockerfile`
+  - base image, port (`8000`), and `CMD` are fixed; `OPENAI_API_KEY` is supplied at `docker run` time, never baked in
 
 For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, and model choice.
 
@@ -310,13 +406,10 @@ For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, 
 - If `reference.pdf` changes, the FAISS index should be rebuilt.
 - The code assumes commands are run from the `rag_assistant/` directory.
 - `FAISS.load_local(..., allow_dangerous_deserialization=True)` should only be used with indexes you trust.
-<<<<<<< HEAD
 - A chunk overlap equal to the chunk size may create highly redundant chunks; consider using a smaller overlap such as `50` to `100`.
 - `langchain-community` must stay pinned to `0.4.1` — see the note in [Requirements](#requirements). Running `pip install -U langchain-community` (or any tool that bumps it independently of `requirements.txt`) will silently break `evaluate.py`/`evaluate_agent.py`.
-=======
 - Checked-in virtual environments and `.env` files can make the repository large and may expose secrets if real keys are committed.
 - `src/agent.py` requires `langchain>=1.0` (for `langchain.agents.create_agent`) and `langgraph` installed; an older `langchain` will raise `ImportError`.
->>>>>>> 512a783af51da055cc9a04d2b07e8e5aa51eb6af
 - The agent makes at least one extra LLM call per tool invocation compared to the static chain, so it is slower and uses more tokens per question in exchange for more thorough, inspectable reasoning.
 - `api.py` builds the chain and agent once at startup; if `faiss_index/` or `.env` isn't in place before the server starts, startup will fail rather than an individual request.
 - Older clones of this repo may still have `rag_assistant/venv/` and `rag_assistant/.env` tracked in git history (from before `.gitignore` was fixed) even though they're untracked going forward — history wasn't rewritten, only future commits are affected.
@@ -324,6 +417,9 @@ For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, 
 - `load_web_chunks()` targets Wikipedia's `#mw-content-text` container specifically (via `bs_kwargs`); a non-Wikipedia URL needs its own CSS/id selector for the actual content area, or it'll pull in the whole page.
 - `dosing_table.csv` is illustrative sample data, not a verified clinical source — see [Multi-Source Architecture](#multi-source-architecture). Don't extend it with real dosing numbers without a citation to an actual authoritative guideline.
 - `lookup_dosing_table` matches `drug` and `indication` as case-insensitive substrings, so an overly short query (e.g. a single letter) could match more rows than intended.
+- The Docker image bakes in whatever `faiss_index/` exists on disk at build time — rebuilding the index (e.g. after adding a source) does nothing to a container already running from the old image. You must `docker build` again and redeploy.
+- The frontend calls `/ask` and `/agent/ask` as same-origin relative paths with no CORS handling anywhere. It only works served from the same FastAPI app (`GET /`) — opening `frontend/index.html` directly as a `file://` URL, or hosting it on a different origin from the API, will fail without adding `CORSMiddleware` to `api.py`.
+- App Runner (see [Deployment](#deployment)) has no built-in scale-to-zero, so it incurs cost even when idle.
 
 ## How To Validate
 
@@ -337,6 +433,8 @@ After setup, validate the project in stages:
 6. Run `python src/evaluate.py` and inspect the Ragas metric averages.
 7. Run `python src/evaluate_agent.py` and confirm all agent behavior checks print `PASS`.
 8. Run `python src/api.py`, then `curl http://localhost:8000/health` and confirm `{"status": "ok"}`, and `POST /ask` + `POST /agent/ask` with a question to confirm both return grounded answers (and `POST /agent/ask` includes a non-empty `trace`).
+9. Open `http://localhost:8000/` in a browser, ask a question on both the "ReAct Agent" and "Static Chain" tabs, and confirm the trace/sources render correctly.
+10. Run `docker build -t healthcare-rag-assistant .` then `docker run -d -p 8000:8000 -e OPENAI_API_KEY=your_real_key healthcare-rag-assistant` and repeat steps 8–9 against the container instead of the local venv — confirms the image is actually self-contained before you deploy it anywhere.
 
 ## Future Improvements
 
@@ -344,10 +442,11 @@ After setup, validate the project in stages:
 - Support multiple PDFs or a folder of documents, not just one.
 - Replace the fragile `#mw-content-text` selector with a more general content-extraction approach (e.g. `trafilatura`) so arbitrary URLs — not just Wikipedia — can be added as web sources without hand-picking a CSS selector per site.
 - Add automated tests for ingestion, retrieval, refusal behavior, and the structured-lookup tool (and for the API endpoints).
-- Containerize `api.py` (Dockerfile) so the service can actually be deployed somewhere.
 - Add auth / rate limiting to the API before exposing it beyond localhost.
 - Add request logging / tracing for the agent's tool-call trace (e.g. LangSmith) so agent cost and behavior can be monitored in production, not just in the CLI trace.
 - Replace `dosing_table.csv`'s illustrative sample data with real, cited dosing figures if this is ever meant to inform real decisions.
+- Automate the image build/push/redeploy flow (e.g. GitHub Actions → ECR → App Runner) instead of the manual `docker build && docker push` + manual redeploy trigger described in [Deployment](#deployment).
+- Move the FAISS index out of the image (e.g. fetched from S3 at container startup) so a new index doesn't require a full image rebuild.
 
 ## License
 

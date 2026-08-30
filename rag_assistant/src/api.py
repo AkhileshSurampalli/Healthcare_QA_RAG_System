@@ -1,9 +1,14 @@
+import os
 import sys
 sys.path.append(".")
 
 from contextlib import asynccontextmanager
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.retriever import load_vector_store
@@ -105,6 +110,12 @@ def ask_agent(request: QuestionRequest):
 
     result = run_with_trace(state["agent"], question)
     return AgentAskResponse(answer=result["answer"], trace=[TraceStep(**step) for step in result["trace"]])
+
+
+# Mounted last and at "/" so it only catches requests that don't match an API
+# route above (Starlette checks routes in registration order) - this lets one
+# service serve both the JSON API and the browser UI, same-origin, no CORS setup.
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":

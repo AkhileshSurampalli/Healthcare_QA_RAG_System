@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Healthcare RAG Assistant</title>
+<style>
+  :root{
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --border: #dde1e6;
+    --ink: #1a2027;
+    --ink-muted: #5b6472;
+    --accent: #2f6fed;
+    --accent-ink: #ffffff;
+    --observation: #eef2ff;
+    --action: #fff4e5;
+    --answer: #e8f7ee;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg: #14181f;
+      --surface: #1b2029;
+      --border: #2b323f;
+      --ink: #e7ebf0;
+      --ink-muted: #98a2b3;
+      --accent: #5b8bf7;
+      --accent-ink: #0b1220;
+      --observation: #1e2436;
+      --action: #2b2416;
+      --answer: #16261d;
+    }
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap{
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 40px 20px 64px;
+  }
+  header{ margin-bottom: 24px; }
+  h1{ font-size: 22px; margin: 0 0 6px; }
+  .sub{ color: var(--ink-muted); font-size: 14px; margin: 0; }
+
+  .tabs{
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab{
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 10px 14px;
+    font-size: 14px;
+    color: var(--ink-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab.active{
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+
+  form{ display: flex; flex-direction: column; gap: 10px; }
+  textarea{
+    width: 100%;
+    min-height: 78px;
+    resize: vertical;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 15px;
+    font-family: inherit;
+  }
+  textarea:focus{ outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .row{ display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .hint{ font-size: 12.5px; color: var(--ink-muted); }
+  button.submit{
+    appearance: none;
+    border: none;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  button.submit:disabled{ opacity: 0.55; cursor: default; }
+
+  .status{ font-size: 13.5px; color: var(--ink-muted); margin-top: 4px; min-height: 18px; }
+  .status.error{ color: #c4432b; }
+
+  .result{ margin-top: 22px; display: flex; flex-direction: column; gap: 14px; }
+  .card{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card h3{ margin: 0 0 8px; font-size: 12.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-muted); }
+  .card p{ margin: 0; white-space: pre-wrap; }
+
+  .trace{ display: flex; flex-direction: column; gap: 8px; }
+  .step{
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13.5px;
+    border: 1px solid var(--border);
+  }
+  .step .kind{
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    color: var(--ink-muted);
+  }
+  .step.action{ background: var(--action); }
+  .step.observation{ background: var(--observation); }
+  .step.answer{ background: var(--answer); }
+  .step code{ font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12.5px; }
+  .step pre{ margin: 0; white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12.5px; }
+
+  .sources{ display: flex; flex-direction: column; gap: 8px; }
+  .source{
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .source .loc{ color: var(--ink-muted); font-size: 11.5px; margin-bottom: 4px; }
+  .source .snippet{ white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Healthcare RAG Assistant</h1>
+      <p class="sub">Ask a question against the ingested clinical guideline, reference sources, and dosing table.</p>
+    </header>
+
+    <div class="tabs">
+      <button type="button" class="tab active" data-mode="agent">ReAct Agent</button>
+      <button type="button" class="tab" data-mode="static">Static Chain</button>
+    </div>
+
+    <form id="ask-form">
+      <textarea id="question" placeholder="e.g. A child with pneumonia weighs 12 kg. What is the amoxicillin per-dose and daily dose in mg?"></textarea>
+      <div class="row">
+        <span class="hint" id="mode-hint">The agent reasons step by step and can call tools more than once.</span>
+        <button type="submit" class="submit" id="submit-btn">Ask</button>
+      </div>
+      <div class="status" id="status"></div>
+    </form>
+
+    <div class="result" id="result"></div>
+  </div>
+
+  <script>
+    const form = document.getElementById("ask-form");
+    const questionEl = document.getElementById("question");
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+    const submitBtn = document.getElementById("submit-btn");
+    const modeHint = document.getElementById("mode-hint");
+    const tabs = document.querySelectorAll(".tab");
+
+    let mode = "agent";
+
+    const HINTS = {
+      agent: "The agent reasons step by step and can call tools more than once.",
+      static: "One fixed retrieve-then-generate pass over the top-3 matching chunks.",
+    };
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        mode = tab.dataset.mode;
+        tabs.forEach((t) => t.classList.toggle("active", t === tab));
+        modeHint.textContent = HINTS[mode];
+        resultEl.innerHTML = "";
+        statusEl.textContent = "";
+      });
+    });
+
+    function escapeHtml(str) {
+      const div = document.createElement("div");
+      div.textContent = str ?? "";
+      return div.innerHTML;
+    }
+
+    function renderStaticResult(data) {
+      const sourcesHtml = data.sources.map((s) => {
+        const loc = s.page != null ? `${s.source ?? "unknown source"} · page ${s.page}` : (s.source ?? "unknown source");
+        return `
+          <div class="source">
+            <div class="loc">${escapeHtml(loc)}</div>
+            <div class="snippet">${escapeHtml(s.content)}</div>
+          </div>`;
+      }).join("");
+
+      resultEl.innerHTML = `
+        <div class="card">
+          <h3>Answer</h3>
+          <p>${escapeHtml(data.answer)}</p>
+        </div>
+        <div class="card">
+          <h3>Sources</h3>
+          <div class="sources">${sourcesHtml || "<p>No sources returned.</p>"}</div>
+        </div>`;
+    }
+
+    function renderAgentResult(data) {
+      const stepsHtml = data.trace.map((step) => {
+        if (step.type === "action") {
+          const args = Object.entries(step.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
+          return `
+            <div class="step action">
+              <span class="kind">Action</span>
+              <code>${escapeHtml(step.tool)}(${escapeHtml(args)})</code>
+            </div>`;
+        }
+        if (step.type === "observation") {
+          return `
+            <div class="step observation">
+              <span class="kind">Observation · ${escapeHtml(step.tool)}</span>
+              <pre>${escapeHtml(step.content)}</pre>
+            </div>`;
+        }
+        return `
+          <div class="step answer">
+            <span class="kind">Answer</span>
+            <p>${escapeHtml(step.content)}</p>
+          </div>`;
+      }).join("");
+
+      resultEl.innerHTML = `
+        <div class="card">
+          <h3>Reasoning trace</h3>
+          <div class="trace">${stepsHtml}</div>
+        </div>`;
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const question = questionEl.value.trim();
+      if (!question) {
+        statusEl.textContent = "Type a question first.";
+        statusEl.classList.add("error");
+        return;
+      }
+
+      statusEl.classList.remove("error");
+      statusEl.textContent = mode === "agent" ? "Reasoning..." : "Retrieving...";
+      submitBtn.disabled = true;
+      resultEl.innerHTML = "";
+
+      const endpoint = mode === "agent" ? "/agent/ask" : "/ask";
+
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        });
+
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.detail || `Request failed (${response.status})`);
+        }
+
+        const data = await response.json();
+        statusEl.textContent = "";
+        if (mode === "agent") {
+          renderAgentResult(data);
+        } else {
+          renderStaticResult(data);
+        }
+      } catch (err) {
+        statusEl.textContent = err.message || "Something went wrong.";
+        statusEl.classList.add("error");
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
