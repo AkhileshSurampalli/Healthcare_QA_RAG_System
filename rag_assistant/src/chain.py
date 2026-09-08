@@ -1,9 +1,14 @@
 import os
+import sys
+sys.path.append(".")
+
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+
+from src.retriever import build_hybrid_retriever
 
 load_dotenv()
 
@@ -13,10 +18,11 @@ def build_rag_chain(vector_store):
     Question → retriever finds top 3 chunks →
     chunks + question sent to LLM → LLM generates answer
     """
-    retriever = vector_store.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 3}
-    )
+    # Hybrid (BM25 + dense MMR) instead of dense-only: pure embedding similarity
+    # can miss exact-term distinctions (two different drug names can embed
+    # close together), and MMR alone only fixes near-duplicate results, not
+    # that blind spot. See build_hybrid_retriever() in retriever.py.
+    retriever = build_hybrid_retriever(vector_store, k=3)
 
     prompt_template = """
 You are a helpful assistant. Use ONLY the context below to answer the question.
@@ -38,8 +44,12 @@ Answer:"""
 
     llm = ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0.7,
-        openai_api_key=os.getenv("OPENAI_API_KEY")
+        # 0, not 0.7: the exact refusal string this prompt depends on ("I don't
+        # have enough information...") gets less reliable at higher temperature.
+        temperature=0,
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        max_retries=2,
+        timeout=30,
     )
 
     def format_docs(docs):
@@ -81,8 +91,6 @@ def ask(chain, retriever, question: str):
 
 
 if __name__ == "__main__":
-    import sys
-    sys.path.append(".")
     from src.retriever import load_vector_store
 
     print("Loading vector store...")

@@ -1,7 +1,11 @@
 import os
+import sys
+sys.path.append(".")
 
 import pandas as pd
 from langchain_core.tools import tool
+
+from src.retriever import build_hybrid_retriever
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DOSING_TABLE_PATH = os.path.join(BASE_DIR, "data", "dosing_table.csv")
@@ -12,7 +16,7 @@ def build_tools(vector_store, k: int = 3, dosing_table_path: str = DEFAULT_DOSIN
     Build the tool set available to the healthcare ReAct agent, covering three
     kinds of sources:
     - Unstructured text (PDF guideline + web reference pages), searched by
-      semantic similarity via `search_clinical_guidelines`.
+      hybrid (BM25 + dense) retrieval via `search_clinical_guidelines`.
     - A structured dosing table (CSV), looked up by exact drug/indication match
       via `lookup_dosing_table` rather than semantic search - dosing numbers
       should come from a structured record, not a fuzzy text match.
@@ -24,8 +28,17 @@ def build_tools(vector_store, k: int = 3, dosing_table_path: str = DEFAULT_DOSIN
     import-time side effects.
     """
 
+    # Built once here, not per-query: BM25Retriever.from_documents tokenizes
+    # every document in the index, which is real work worth paying once per
+    # agent build, not on every search_clinical_guidelines call.
+    hybrid_retriever = build_hybrid_retriever(vector_store, k=k)
+
     def _search_guidelines(query: str) -> str:
-        docs = vector_store.similarity_search(query, k=k)
+        try:
+            docs = hybrid_retriever.invoke(query)
+        except Exception as e:
+            return f"Search failed unexpectedly ({type(e).__name__}: {e}). Try a different query."
+
         if not docs:
             return "No relevant passages found in the ingested sources."
 
@@ -52,15 +65,33 @@ def build_tools(vector_store, k: int = 3, dosing_table_path: str = DEFAULT_DOSIN
     def _cell(value) -> str:
         return "not specified" if pd.isna(value) else str(value)
 
+    MIN_QUERY_LEN = 3
+
     def _lookup_dosing(drug: str, indication: str = "") -> str:
+        drug = (drug or "").strip()
+        if len(drug) < MIN_QUERY_LEN:
+            return (
+                f"'{drug}' is too short to match safely (minimum {MIN_QUERY_LEN} characters) - "
+                f"a short substring risks matching the wrong drug. Provide a fuller drug name."
+            )
+
         try:
             table = pd.read_csv(dosing_table_path)
+            required_cols = {
+                "drug", "indication", "population", "dose_per_kg", "dose_unit",
+                "frequency_per_day", "max_single_dose", "max_dose_unit", "notes",
+            }
+            missing = required_cols - set(table.columns)
+            if missing:
+                return f"Dosing table is missing expected column(s): {sorted(missing)}. Cannot look up dosing."
+
+            matches = table[table["drug"].str.contains(drug, case=False, na=False)]
+            if indication:
+                matches = matches[matches["indication"].str.contains(indication, case=False, na=False)]
         except FileNotFoundError:
             return f"Dosing table not found at {dosing_table_path}."
-
-        matches = table[table["drug"].str.contains(drug, case=False, na=False)]
-        if indication:
-            matches = matches[matches["indication"].str.contains(indication, case=False, na=False)]
+        except Exception as e:
+            return f"Dosing table lookup failed unexpectedly ({type(e).__name__}: {e})."
 
         if matches.empty:
             available = ", ".join(sorted(table["drug"].unique()))
@@ -103,14 +134,17 @@ def build_tools(vector_store, k: int = 3, dosing_table_path: str = DEFAULT_DOSIN
         `search_clinical_guidelines`) so the arithmetic is exact rather than
         estimated by the model. Returns the per-dose amount and the total daily
         amount in mg."""
-        if weight_kg <= 0 or dose_per_kg_mg <= 0 or doses_per_day <= 0:
-            return "Invalid input: weight, dose per kg, and doses per day must all be positive numbers."
+        try:
+            if weight_kg <= 0 or dose_per_kg_mg <= 0 or doses_per_day <= 0:
+                return "Invalid input: weight, dose per kg, and doses per day must all be positive numbers."
 
-        per_dose = weight_kg * dose_per_kg_mg
-        daily_total = per_dose * doses_per_day
-        return (
-            f"Per-dose amount: {per_dose:.1f} mg, given {doses_per_day}x/day. "
-            f"Total daily dose: {daily_total:.1f} mg."
-        )
+            per_dose = weight_kg * dose_per_kg_mg
+            daily_total = per_dose * doses_per_day
+            return (
+                f"Per-dose amount: {per_dose:.1f} mg, given {doses_per_day}x/day. "
+                f"Total daily dose: {daily_total:.1f} mg."
+            )
+        except Exception as e:
+            return f"Dose calculation failed unexpectedly ({type(e).__name__}: {e})."
 
     return [search_clinical_guidelines, lookup_dosing_table, calculate_dose]

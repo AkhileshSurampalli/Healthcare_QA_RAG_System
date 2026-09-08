@@ -2,6 +2,8 @@ import os
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
 
 load_dotenv()
 
@@ -44,6 +46,41 @@ def load_vector_store():
     )
     print(f"Loaded vector store with {vector_store.index.ntotal} vectors")
     return vector_store
+
+def build_hybrid_retriever(vector_store, k: int = 3, dense_weight: float = 0.6):
+    """
+    Combine BM25 (keyword/exact-term) retrieval with FAISS's dense MMR search
+    via reciprocal-rank fusion, instead of relying on embedding similarity
+    alone.
+
+    Pure dense retrieval has a real blind spot: two clinically distinct terms
+    (e.g. two different antibiotics used for the same condition) can embed
+    close together, so a purely semantic search can surface the wrong drug's
+    passage with high confidence. BM25 catches exact-term matches dense search
+    can miss; MMR still contributes result diversity on the dense side. This
+    is shared by both chain.py and tools.py so hybrid retrieval only has to be
+    built in one place.
+
+    BM25Retriever needs the raw documents, not embeddings - rather than
+    re-running ingestion (network calls to re-fetch the PDF/web sources), this
+    pulls them straight back out of the already-loaded FAISS index's docstore,
+    which holds exactly the same documents the dense index was built from.
+    """
+    docs = list(vector_store.docstore._dict.values())
+
+    bm25_retriever = BM25Retriever.from_documents(docs)
+    bm25_retriever.k = k
+
+    dense_retriever = vector_store.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": k, "fetch_k": max(k * 4, 20)}
+    )
+
+    return EnsembleRetriever(
+        retrievers=[bm25_retriever, dense_retriever],
+        weights=[1 - dense_weight, dense_weight],
+    )
+
 
 def test_retrieval(vector_store, query: str):
     """

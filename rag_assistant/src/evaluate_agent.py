@@ -2,9 +2,10 @@ import sys
 sys.path.append(".")
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 
 from src.retriever import load_vector_store
-from src.agent import build_agent
+from src.agent import build_agent, RECURSION_LIMIT
 from src.evaluate import QUESTIONS, GROUND_TRUTHS, run_ragas_metrics
 
 REFUSAL_TEXT = "I don't have enough information in the document to answer this."
@@ -46,7 +47,15 @@ def run_agent_and_trace(agent, question: str):
     - the retrieved passages from every search_clinical_guidelines call (for Ragas)
     - a count of how many times each tool was called (for the behavior checks)
     """
-    result = agent.invoke({"messages": [HumanMessage(content=question)]})
+    try:
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=question)]},
+            config={"recursion_limit": RECURSION_LIMIT},
+        )
+    except GraphRecursionError:
+        # Same safety net as agent.py's run_with_trace(): a question that
+        # can't converge shouldn't take the whole eval run down with it.
+        return "[recursion limit exceeded]", [], {}
 
     contexts = []
     tool_calls = {}

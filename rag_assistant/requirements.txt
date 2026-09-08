@@ -10,10 +10,17 @@ langgraph==1.2.4
 # which was removed in 0.4.2. Do not bump this without re-checking that import.
 langchain-community==0.4.1
 
+# EnsembleRetriever (hybrid BM25 + dense retrieval, see retriever.py) lives in
+# langchain_classic in this langchain 1.x line, not langchain_community.
+langchain-classic==1.0.7
+
 # Vector store, embeddings, document loading
 faiss-cpu==1.14.2
 pypdf==6.12.2
 beautifulsoup4==4.15.0
+
+# BM25 keyword retrieval (paired with dense FAISS search via EnsembleRetriever)
+rank_bm25==0.2.2
 
 # Structured-source lookup (dosing table)
 pandas==3.0.5

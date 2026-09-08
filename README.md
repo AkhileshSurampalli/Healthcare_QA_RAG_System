@@ -21,6 +21,7 @@ The project ingests **three kinds of sources** — a PDF clinical guideline, ref
 - A minimal browser frontend (vanilla HTML/JS, no build step) served by that same FastAPI app
 - One pinned `requirements.txt` and a single project venv (`rag_assistant/.venv`)
 - A `Dockerfile` that bakes in the pre-built FAISS index, so the built image is the deployable unit — see [Deployment](#deployment)
+- Reliability hardening against the RAG failure modes in [Bottlenecks & Failure Modes](#bottlenecks--failure-modes): a bounded agent loop, hybrid (BM25 + dense MMR) retrieval, graceful tool-level error handling, and translated (not bare) API error responses
 
 ## Project Structure
 
@@ -106,6 +107,7 @@ Notable pins:
 - `langchain-community==0.4.1`, **not** the latest 0.4.2. `ragas==0.4.3` unconditionally imports `langchain_community.chat_models.vertexai.ChatVertexAI`, which was removed from `langchain-community` in 0.4.2. Bumping `langchain-community` without checking that import first will break `evaluate.py` and `evaluate_agent.py` with `ModuleNotFoundError`.
 - `langchain==1.3.4` / `langgraph==1.2.4` — required for `langchain.agents.create_agent`, used by the ReAct agent in `agent.py`.
 - `faiss-cpu==1.14.2` — the vector store backend.
+- `langchain-classic==1.0.7` — `EnsembleRetriever` lives here in this langchain 1.x line, not in `langchain_community`. `rank_bm25` is the actual BM25 implementation it wraps. Both are only used by `build_hybrid_retriever()` in `retriever.py`.
 - `fastapi`/`uvicorn` — only needed to run `api.py`.
 
 If you previously had separate venvs per script (e.g. one missing `faiss-cpu`, another missing `ragas`), delete them and use the single `rag_assistant/.venv` above instead — running different scripts from different environments is what caused that split in the first place.
@@ -382,15 +384,17 @@ Important settings are currently defined directly in the source files:
 - `src/retriever.py`
   - embedding model: `text-embedding-3-small`
   - FAISS index path: `faiss_index`
+  - `build_hybrid_retriever(vector_store, k=3, dense_weight=0.6)` — BM25/dense weighting; shared by `chain.py` and `tools.py`
 - `src/chain.py`
-  - chat model: `gpt-4o-mini`
-  - retrieval `k=3`
-  - temperature: `0.7`
+  - chat model: `gpt-4o-mini`, temperature `0`, `max_retries=2`, `timeout=30`
+  - retrieval: hybrid (BM25 + dense MMR) via `build_hybrid_retriever`, `k=3`
 - `src/tools.py` / `src/agent.py`
-  - retrieval `k=3` (via `build_tools(vector_store, k=3)`)
+  - retrieval: hybrid (BM25 + dense MMR) via `build_hybrid_retriever`, `k=3`, built once per `build_tools()` call
   - `dosing_table_path` — defaults to `data/dosing_table.csv` (via `build_tools(..., dosing_table_path=...)`)
-  - chat model: `gpt-4o-mini`, temperature: `0.7`
-  - system prompt controlling ReAct behavior, source preference (structured lookup over text search for dosing), and refusal wording
+  - `MIN_QUERY_LEN=3` in `tools.py` — minimum drug-name length `lookup_dosing_table` will match on
+  - chat model: `gpt-4o-mini`, temperature `0`, `max_retries=2`, `timeout=30`
+  - `RECURSION_LIMIT=15` in `agent.py` — caps model↔tools round trips per question
+  - system prompt controlling ReAct behavior, source preference (structured lookup over text search for dosing), prompt-injection guard on tool output, and refusal wording
 - `src/api.py`
   - host `0.0.0.0`, port `8000` (when run via `python src/api.py`; override with `uvicorn src.api:app --host ... --port ...`)
   - chain and agent are built once at startup (in the `lifespan` handler), not per-request
@@ -416,10 +420,36 @@ For experiments, tune chunk size, chunk overlap, retrieval `k`, prompt wording, 
 - `load_web_chunks()` only works for pages whose real content is in plain server-rendered HTML. Sites that hydrate their content client-side from a JS-embedded JSON blob (WHO's own fact-sheet pages are like this) will return mostly nav/footer boilerplate instead of the article — check the page source before adding a new URL to `DEFAULT_WEB_SOURCES`.
 - `load_web_chunks()` targets Wikipedia's `#mw-content-text` container specifically (via `bs_kwargs`); a non-Wikipedia URL needs its own CSS/id selector for the actual content area, or it'll pull in the whole page.
 - `dosing_table.csv` is illustrative sample data, not a verified clinical source — see [Multi-Source Architecture](#multi-source-architecture). Don't extend it with real dosing numbers without a citation to an actual authoritative guideline.
-- `lookup_dosing_table` matches `drug` and `indication` as case-insensitive substrings, so an overly short query (e.g. a single letter) could match more rows than intended.
+- `lookup_dosing_table` still matches `drug`/`indication` as case-insensitive substrings (just with a 3-character minimum now — see [Bottlenecks & Failure Modes](#bottlenecks--failure-modes)), so an ambiguous partial name can still match more rows than intended.
 - The Docker image bakes in whatever `faiss_index/` exists on disk at build time — rebuilding the index (e.g. after adding a source) does nothing to a container already running from the old image. You must `docker build` again and redeploy.
 - The frontend calls `/ask` and `/agent/ask` as same-origin relative paths with no CORS handling anywhere. It only works served from the same FastAPI app (`GET /`) — opening `frontend/index.html` directly as a `file://` URL, or hosting it on a different origin from the API, will fail without adding `CORSMiddleware` to `api.py`.
 - App Runner (see [Deployment](#deployment)) has no built-in scale-to-zero, so it incurs cost even when idle.
+- `build_hybrid_retriever()` rebuilds the BM25 index from scratch (tokenizing every document pulled out of the FAISS docstore) every time it's called — once at `api.py` startup via `build_rag_chain`/`build_agent`, and again separately inside `build_tools`, so the agent and the static chain each pay this cost independently rather than sharing one BM25 index. Fine at ~4,000–5,000 chunks; would need caching/sharing if the corpus grows much larger or startup time becomes a problem.
+
+## Bottlenecks & Failure Modes
+
+RAG systems fail in fairly predictable ways — bad chunk boundaries, near-duplicate retrieval, non-deterministic agent behavior, unhandled upstream errors, unbounded reasoning loops, prompt injection from ingested content. A few of those were mitigated directly in this codebase:
+
+| Failure mode | Mitigation | Where |
+|---|---|---|
+| Runaway agent loop (a question the agent can't converge on burns unbounded LLM calls) | `RECURSION_LIMIT=15` passed to every `agent.invoke()`; `GraphRecursionError` caught and turned into a clean fallback answer instead of an unhandled exception | `agent.py`'s `run_with_trace()`, `evaluate_agent.py`'s `run_agent_and_trace()` |
+| Near-duplicate retrieved chunks (adjacent chunks share ~40% of their text at `chunk_overlap=200`/`chunk_size=500`) | MMR on the dense side instead of plain similarity search, trading a little relevance for result diversity | `retriever.py`'s `build_hybrid_retriever` |
+| Pure embedding similarity misses exact-term distinctions (e.g. two different antibiotics that embed close together, so a semantic-only search can surface the wrong drug's passage with high confidence) | Hybrid retrieval: BM25 (keyword) + dense MMR combined via `EnsembleRetriever` reciprocal-rank fusion, weighted 40/60 toward dense by default. Verified live against the real index: for the query `"cotrimoxazole"`, hybrid surfaced two genuinely relevant passages (pneumonia/penicillin dosing, PCP treatment) that dense-only MMR's top-3 missed entirely | `retriever.py`'s `build_hybrid_retriever`, used by both `chain.py` and `tools.py` |
+| A tool exception crashing the whole request | Every tool body (`search_clinical_guidelines`, `lookup_dosing_table`, `calculate_dose`) catches unexpected exceptions and returns a message the agent can act on, instead of propagating | `tools.py` |
+| Ambiguous short drug-name matches in the structured lookup | `MIN_QUERY_LEN=3` guard before the substring match runs | `tools.py`'s `_lookup_dosing` |
+| Bare, uninformative `500` on any upstream failure (this is what the placeholder-key error actually was, earlier in this project's development) | `openai.OpenAIError` (auth/rate-limit/timeout/bad-request) translated to a `502` with the real upstream message; anything else to a `500` with just the exception type, never a raw traceback | `api.py`'s `_run_or_translate_errors` |
+| Refusal-string and tool-call inconsistency at higher temperature | `temperature` reverted to `0` in both `chain.py` and `agent.py` (it had drifted to `0.7`) | `chain.py`, `agent.py` |
+| Transient network/rate-limit failures with no retry | `max_retries=2`, `timeout=30` on every `ChatOpenAI` instance | `chain.py`, `agent.py` |
+| Prompt injection via ingested content (a web source is outside this project's control and could be edited by anyone) | System prompt instructs the agent to treat all tool output as data, never as instructions to follow | `agent.py`'s `SYSTEM_PROMPT` |
+
+**Not mitigated yet** — real gaps, not silently assumed fixed:
+- No cross-encoder re-ranking step — hybrid retrieval (above) widens the candidate set and fixes the *exact-term-missed* failure mode specifically, but nothing re-scores the fused BM25+dense results with a model that actually reads query and passage together; the RRF fusion weighting is a coarser signal than that.
+- No authority weighting between sources — a Wikipedia passage and a WHO guideline passage score purely on retrieval rank, with nothing to prefer the more authoritative one when they'd disagree.
+- `evaluate_agent.py`'s behavior checks (4 hand-picked cases) assert *exact* tool-call counts — a legitimate strategy shift by the model (e.g. one search instead of two, still correct) would currently read as a failure, not a pass.
+- No adversarial or load testing — concurrent request safety on the shared `state` dict in `api.py`, and behavior under deliberately adversarial input, are both unverified.
+- `load_web_chunks()`'s Wikipedia-specific `#mw-content-text` selector has no automated check that it's still returning real content and not silently degraded nav text.
+
+The general version of this table — the checklist to run against *any* RAG project, not just this one — is retrieval → augmentation → generation → agent orchestration → evaluation → security → ops, asking at each stage "what's the cheapest realistic input that breaks this?"
 
 ## How To Validate
 
@@ -435,6 +465,8 @@ After setup, validate the project in stages:
 8. Run `python src/api.py`, then `curl http://localhost:8000/health` and confirm `{"status": "ok"}`, and `POST /ask` + `POST /agent/ask` with a question to confirm both return grounded answers (and `POST /agent/ask` includes a non-empty `trace`).
 9. Open `http://localhost:8000/` in a browser, ask a question on both the "ReAct Agent" and "Static Chain" tabs, and confirm the trace/sources render correctly.
 10. Run `docker build -t healthcare-rag-assistant .` then `docker run -d -p 8000:8000 -e OPENAI_API_KEY=your_real_key healthcare-rag-assistant` and repeat steps 8–9 against the container instead of the local venv — confirms the image is actually self-contained before you deploy it anywhere.
+11. Sanity-check the hardening in [Bottlenecks & Failure Modes](#bottlenecks--failure-modes): ask `lookup_dosing_table` for a drug via a 1–2 character name (through the agent, e.g. "what's the dose of am?") and confirm it refuses to guess rather than returning a match; confirm a normal question through `/ask` or `/agent/ask` still returns `200` with a grounded answer (proves `temperature=0` didn't regress anything).
+12. Confirm hybrid retrieval is actually contributing: call `vector_store.max_marginal_relevance_search("cotrimoxazole", k=3, fetch_k=20)` and separately `build_hybrid_retriever(vector_store, k=3).invoke("cotrimoxazole")` and check the hybrid result set includes passages the dense-only one doesn't.
 
 ## Future Improvements
 
@@ -447,6 +479,11 @@ After setup, validate the project in stages:
 - Replace `dosing_table.csv`'s illustrative sample data with real, cited dosing figures if this is ever meant to inform real decisions.
 - Automate the image build/push/redeploy flow (e.g. GitHub Actions → ECR → App Runner) instead of the manual `docker build && docker push` + manual redeploy trigger described in [Deployment](#deployment).
 - Move the FAISS index out of the image (e.g. fetched from S3 at container startup) so a new index doesn't require a full image rebuild.
+- Add a cross-encoder re-ranking step on top of the hybrid (BM25 + dense) retrieval that's now in place — see [Bottlenecks & Failure Modes](#bottlenecks--failure-modes).
+- Share one `build_hybrid_retriever()` result between `chain.py` and `tools.py` in `api.py`'s startup instead of building the BM25 index twice.
+- Add source-authority weighting so a Wikipedia passage and a WHO guideline passage aren't scored as equally trustworthy.
+- Loosen `evaluate_agent.py`'s behavior-check assertions from exact tool-call counts to "did it reach a correct, grounded answer via *a* reasonable tool sequence," so a legitimate alternate strategy doesn't read as a regression.
+- Add concurrency/load testing against `api.py`'s shared `state` dict before trusting it under real traffic.
 
 ## License
 

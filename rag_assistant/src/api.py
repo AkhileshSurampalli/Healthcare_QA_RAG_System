@@ -9,7 +9,10 @@ FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from openai import OpenAIError
 from pydantic import BaseModel
+
+MAX_QUESTION_LEN = 2000
 
 from src.retriever import load_vector_store
 from src.chain import build_rag_chain
@@ -80,7 +83,31 @@ def _validated_question(request: QuestionRequest) -> str:
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
+    if len(question) > MAX_QUESTION_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"question must be {MAX_QUESTION_LEN} characters or fewer (got {len(question)})",
+        )
     return question
+
+
+def _run_or_translate_errors(fn):
+    """
+    Run a chain/agent call and turn the failure modes we actually expect into
+    clean HTTP responses instead of a bare, bodyless 500 (which is what every
+    unhandled exception - including OpenAI auth/rate-limit/timeout errors -
+    produced before this, and is genuinely uninformative to a caller).
+    """
+    try:
+        return fn()
+    except OpenAIError as e:
+        # The model provider is unreachable, rejected the key, rate-limited us,
+        # or timed out - not something wrong with the request itself.
+        raise HTTPException(status_code=502, detail=f"Upstream model provider error: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {type(e).__name__}")
 
 
 @app.get("/health")
@@ -93,14 +120,16 @@ def ask_static(request: QuestionRequest):
     """Static RAG: one fixed retrieve -> augment -> generate pass. See chain.py."""
     question = _validated_question(request)
 
-    answer = state["chain"].invoke(question)
-    docs = state["retriever"].invoke(question)
-    sources = [
-        Source(content=doc.page_content, source=doc.metadata.get("source"), page=doc.metadata.get("page"))
-        for doc in docs
-    ]
+    def _call():
+        answer = state["chain"].invoke(question)
+        docs = state["retriever"].invoke(question)
+        sources = [
+            Source(content=doc.page_content, source=doc.metadata.get("source"), page=doc.metadata.get("page"))
+            for doc in docs
+        ]
+        return AskResponse(answer=answer, sources=sources)
 
-    return AskResponse(answer=answer, sources=sources)
+    return _run_or_translate_errors(_call)
 
 
 @app.post("/agent/ask", response_model=AgentAskResponse)
@@ -108,8 +137,11 @@ def ask_agent(request: QuestionRequest):
     """ReAct agent: reasons over search/calculate tool calls. See agent.py."""
     question = _validated_question(request)
 
-    result = run_with_trace(state["agent"], question)
-    return AgentAskResponse(answer=result["answer"], trace=[TraceStep(**step) for step in result["trace"]])
+    def _call():
+        result = run_with_trace(state["agent"], question)
+        return AgentAskResponse(answer=result["answer"], trace=[TraceStep(**step) for step in result["trace"]])
+
+    return _run_or_translate_errors(_call)
 
 
 # Mounted last and at "/" so it only catches requests that don't match an API
